@@ -10,7 +10,6 @@ import uvicorn
 from config import settings
 from openshift_client import openshift_client
 from watsonx_client import watsonx_client
-from ica_client import ica_client
 
 try:
     from rag_system import rag_system
@@ -288,72 +287,15 @@ async def root():
 @app.get("/health")
 async def health_check():
     wx_healthy  = await watsonx_client.check_health()
-    ica_healthy = await ica_client.check_health()
     rag_status  = "healthy" if RAG_AVAILABLE else "unavailable"
     rag_docs    = rag_system.get_stats()["total_documents"] if RAG_AVAILABLE else 0
     return {
         "api": "healthy",
         "watsonx_ai": "healthy" if wx_healthy else "unavailable",
-        "ica": "healthy" if ica_healthy else ("unconfigured" if not settings.ica_api_key else "unavailable"),
         "model": settings.watsonx_model,
         "rag_system": rag_status,
         "knowledge_base_docs": rag_docs,
     }
-
-@app.post("/api/chat/ica", response_model=ChatResponse)
-async def chat_ica(request: ChatRequest):
-    """Chat endpoint that uses IBM Consulting Advantage (ICA) instead of watsonx.ai."""
-    if not settings.ica_api_key:
-        raise HTTPException(status_code=503, detail="ICA_API_KEY is not configured on the server.")
-    try:
-        intents = _detect_intents(request.message)
-        context_parts: List[str] = []
-        action_summary = None
-        action_success = None
-
-        parsed_action = _parse_action(request.message)
-        if parsed_action:
-            summary, ok = await _execute_action(parsed_action)
-            action_summary = summary
-            action_success = ok
-            context_parts.append(
-                f"CLUSTER ACTION EXECUTED:\n"
-                f"  Action  : {parsed_action['action'].upper()} {parsed_action['kind']}\n"
-                f"  Target  : {parsed_action.get('name','?')} in {parsed_action.get('namespace','?')}\n"
-                f"  Result  : {'SUCCESS' if ok else 'FAILED'} - {summary}"
-            )
-            intents.update({"pods", "namespaces"})
-
-        if request.include_context and RAG_AVAILABLE and intents:
-            rag_ctx = rag_system.get_relevant_context(request.message, max_results=2)
-            if rag_ctx:
-                context_parts.append(f"RUNBOOK CONTEXT:\n{rag_ctx}")
-
-        if intents:
-            cluster_ctx = await _build_cluster_context(intents)
-            if cluster_ctx == "TOKEN_EXPIRED":
-                return ChatResponse(
-                    response="⚠️ **OpenShift token expired.** Update it via the Token button in the header.",
-                    action_performed=None, action_success=None, context_used=None
-                )
-            if cluster_ctx:
-                context_parts.append(cluster_ctx)
-
-        context = "\n\n".join(context_parts) if context_parts else None
-        history = None
-        if request.conversation_history:
-            history = [{"role": m.role, "content": m.content} for m in request.conversation_history]
-
-        response = await ica_client.answer_question(
-            question=request.message, context=context, conversation_history=history)
-
-        return ChatResponse(response=response, action_performed=action_summary,
-                            action_success=action_success, context_used=context if context else None)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
@@ -632,7 +574,7 @@ async def test_watsonx():
     if not settings.watsonx_api_key:
         return {"status": "error", "message": "WATSONX_API_KEY is not set in backend/.env"}
     try:
-        reply = await ica_client.answer_question("Reply with exactly: watsonx connection OK")
+        reply = await watsonx_client.answer_question("Reply with exactly: watsonx connection OK")
         return {"status": "ok", "model": settings.watsonx_model,
                 "base_url": settings.watsonx_base_url, "reply": reply}
     except Exception as e:
