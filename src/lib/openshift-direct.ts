@@ -67,6 +67,7 @@ export interface OCPodContainerStatus {
   name: string;
   restartCount: number;
   state: Record<string, unknown>;
+  lastState?: Record<string, unknown>;
   ready: boolean;
   image: string;
 }
@@ -80,7 +81,12 @@ export interface OCPod {
     ownerReferences?: Array<{ kind: string; name: string; uid: string }>;
   };
   spec: { nodeName?: string; containers: OCPodContainer[] };
-  status: { phase: string; containerStatuses?: OCPodContainerStatus[] };
+  status: {
+    phase: string;
+    startTime?: string;
+    conditions?: Array<{ type: string; status: string; lastTransitionTime?: string }>;
+    containerStatuses?: OCPodContainerStatus[];
+  };
 }
 
 export interface OCNode {
@@ -201,9 +207,6 @@ export async function getEvents(namespace?: string): Promise<OCEvent[]> {
 
 export async function getPodLogs(namespace: string, podName: string, container?: string): Promise<string> {
   // Always goes through the backend (both dev and prod) — the backend handles log fetching
-  const params = new URLSearchParams();
-  if (container) params.set('container', container);
-  const qs = params.toString() ? `?${params}` : '';
   // In dev use BACKEND_URL directly (localhost:8000), in prod use BACKEND_URL (Netlify function)
   const res = await fetch(`${BACKEND_URL}/api/action`, {
     method: 'POST',

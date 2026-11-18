@@ -52,6 +52,54 @@ const fadeUp = {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+const WINDOW_24H_MS = 24 * 60 * 60 * 1000;
+
+// True when the event was last seen within the past 24 hours
+function isWithinLast24h(e: OCEvent): boolean {
+  const ts = e.lastTimestamp || e.metadata.creationTimestamp;
+  const t = ts ? new Date(ts).getTime() : NaN;
+  return !Number.isNaN(t) && Date.now() - t <= WINDOW_24H_MS;
+}
+
+function tsMs(v: unknown): number {
+  const t = typeof v === 'string' ? new Date(v).getTime() : NaN;
+  return Number.isNaN(t) ? 0 : t;
+}
+
+function terminatedAt(state?: Record<string, unknown>): number {
+  const t = state?.terminated as { finishedAt?: string } | undefined;
+  return tsMs(t?.finishedAt);
+}
+
+// Most recent moment anything happened to the pod (created, started, status change, container exit)
+function podLastActivity(p: OCPod): number {
+  let latest = Math.max(tsMs(p.metadata.creationTimestamp), tsMs(p.status.startTime));
+  p.status.conditions?.forEach(c => { latest = Math.max(latest, tsMs(c.lastTransitionTime)); });
+  p.status.containerStatuses?.forEach(cs => {
+    latest = Math.max(latest, terminatedAt(cs.state), terminatedAt(cs.lastState));
+  });
+  return latest;
+}
+
+// Running/Pending pods are current state, so they always count. Finished (Succeeded/Failed)
+// pods only count when they finished within the last 24 hours.
+function isPodInWindow(p: OCPod): boolean {
+  if (p.status.phase !== 'Succeeded' && p.status.phase !== 'Failed') return true;
+  return Date.now() - podLastActivity(p) <= WINDOW_24H_MS;
+}
+
+// Restarts that happened in the last 24 hours. Kubernetes only exposes a lifetime counter plus the
+// time of the last exit, so for pods older than 24h this is a lower bound (1 per recently-restarted container).
+function restartsLast24h(p: OCPod): number {
+  const now = Date.now();
+  const podYoung = now - tsMs(p.metadata.creationTimestamp) <= WINDOW_24H_MS;
+  return (p.status.containerStatuses ?? []).reduce((sum, cs) => {
+    if (!cs.restartCount) return sum;
+    if (podYoung) return sum + cs.restartCount;
+    return sum + (now - terminatedAt(cs.lastState) <= WINDOW_24H_MS ? 1 : 0);
+  }, 0);
+}
+
 function nowLabel() {
   return new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
@@ -67,9 +115,7 @@ function nowFull() {
 function deriveMetrics(pods: OCPod[], nodes: OCNode[]) {
   const totalPods = pods.length;
   const runningPods = pods.filter(p => p.status.phase === 'Running').length;
-  const totalRestarts = pods.reduce(
-    (s, p) => s + (p.status.containerStatuses?.reduce((r, cs) => r + cs.restartCount, 0) ?? 0), 0
-  );
+  const totalRestarts = pods.reduce((s, p) => s + restartsLast24h(p), 0);
 
   // Sum allocatable cores across nodes (format: "4" or "4000m")
   let totalCores = 0;
@@ -175,7 +221,20 @@ function UtilBar({ label, value, unit = '%', warn = 70, crit = 85 }: {
 
 // ── main component ────────────────────────────────────────────────────────────
 
-const WINDOW = 20; // keep last 20 data points
+// Utilisation samples are kept in the browser for the last 24 hours
+const SERIES_KEY = 'dashboard-utilisation-series';
+const SERIES_MIN_GAP_MS = 60_000; // store at most one sample per minute
+type SeriesPoint = { ts: number; time: string; cpu: number; mem: number; disk: number };
+
+function loadSeries(): SeriesPoint[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SERIES_KEY) || '[]') as SeriesPoint[];
+    const cutoff = Date.now() - WINDOW_24H_MS;
+    return Array.isArray(raw) ? raw.filter(p => typeof p.ts === 'number' && p.ts >= cutoff) : [];
+  } catch {
+    return [];
+  }
+}
 
 // Available live-poll intervals in seconds
 const INTERVALS = [
@@ -209,7 +268,7 @@ export default function Dashboard() {
   const nextTickRef  = useRef<number>(0);
 
   // rolling time-series for resource utilisation
-  const [series, setSeries] = useState<{ time: string; cpu: number; mem: number; disk: number }[]>([]);
+  const [series, setSeries] = useState<SeriesPoint[]>(loadSeries);
 
   const fetchData = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -220,16 +279,24 @@ export default function Dashboard() {
         getNamespaces(), getPods(), getNodes(), getDeployments(), getEvents(),
       ]);
       setNamespaces(ns);
-      setPods(pd);
+      const podsInWindow = pd.filter(isPodInWindow);
+      setPods(podsInWindow);
       setNodes(nd);
       setDeployments(dep);
-      setEvents(ev);
+      setEvents(ev.filter(isWithinLast24h));
       setLastRefresh(nowFull());
 
-      // Push new data point into rolling series
-      const { cpu, mem, disk } = deriveMetrics(pd, nd);
-      const point = { time: nowLabel(), cpu, mem, disk };
-      setSeries(prev => [...prev.slice(-(WINDOW - 1)), point]);
+      // Push a new sample into the 24-hour series (max one per minute), dropping older ones
+      const { cpu, mem, disk } = deriveMetrics(podsInWindow, nd);
+      const now = Date.now();
+      const point: SeriesPoint = { ts: now, time: nowLabel(), cpu, mem, disk };
+      setSeries(prev => {
+        const kept = prev.filter(p => now - p.ts <= WINDOW_24H_MS);
+        const last = kept[kept.length - 1];
+        const next = last && now - last.ts < SERIES_MIN_GAP_MS ? [...kept.slice(0, -1), point] : [...kept, point];
+        try { localStorage.setItem(SERIES_KEY, JSON.stringify(next)); } catch { /* storage full/unavailable */ }
+        return next;
+      });
     } catch (err) {
       if (!silent) setError(err instanceof Error ? err.message : 'Failed to fetch cluster data');
     }
@@ -305,7 +372,7 @@ export default function Dashboard() {
   const succeededPods = pods.filter(p => p.status.phase === 'Succeeded').length;
   const readyNodes    = nodes.filter(n => isNodeReady(n)).length;
   const notReadyNodes = nodes.length - readyNodes;
-  const totalRestarts = pods.reduce((s, p) => s + (p.status.containerStatuses?.reduce((r, cs) => r + cs.restartCount, 0) ?? 0), 0);
+  const totalRestarts = pods.reduce((s, p) => s + restartsLast24h(p), 0);
   const warningEvents = events.filter(e => e.type === 'Warning').length;
   const healthScore   = nodes.length > 0
     ? Math.round((readyNodes / nodes.length) * 100)
@@ -331,12 +398,13 @@ export default function Dashboard() {
   });
 
   // Custom tooltip for the area chart
-  const AreaTooltip = ({ active, payload, label }: any) => {
+  type TooltipEntry = { dataKey: string; color: string; value: number };
+  const AreaTooltip = ({ active, payload, label }: { active?: boolean; payload?: TooltipEntry[]; label?: string }) => {
     if (!active || !payload?.length) return null;
     return (
       <div className={`rounded-lg border px-3 py-2 text-xs shadow-lg ${isDark ? 'bg-[#0d1220] border-white/10 text-white' : 'bg-white border-gray-200 text-gray-900'}`}>
         <p className={`font-semibold mb-1 ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>{label}</p>
-        {payload.map((p: any) => (
+        {payload.map((p) => (
           <div key={p.dataKey} className="flex items-center gap-2">
             <div className="w-2 h-2 rounded-full" style={{ backgroundColor: p.color }} />
             <span className="capitalize">{p.dataKey}:</span>
@@ -379,7 +447,7 @@ export default function Dashboard() {
         <div>
           <h1 className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>Operations Dashboard</h1>
           <p className={`text-sm mt-1 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-            {namespaces.length} projects · {pods.length} pods{nodes.length > 0 ? ` · ${nodes.length} nodes` : ''}
+            {namespaces.length} projects · {pods.length} pods{nodes.length > 0 ? ` · ${nodes.length} nodes` : ''} · last 24 hours
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -512,8 +580,8 @@ export default function Dashboard() {
         <KPICard icon={Boxes}         label="Namespaces"    value={namespaces.length}  sub="projects"                    color="text-cyan-400"    delay={0.05} />
         <KPICard icon={Container}     label="Running Pods"  value={runningPods}        sub={`of ${pods.length} total`}   color="text-emerald-400" delay={0.1}  />
         <KPICard icon={AlertTriangle} label="Failed Pods"   value={failedPods}         sub={pendingPods > 0 ? `${pendingPods} pending` : 'none pending'} color="text-red-400" delay={0.15} />
-        <KPICard icon={RotateCcw}     label="Total Restarts" value={totalRestarts}     sub="all namespaces"              color="text-yellow-400"  delay={0.2}  />
-        <KPICard icon={Shield}        label="Warnings"      value={warningEvents}      sub={`of ${events.length} events`} color="text-orange-400" delay={0.25} />
+        <KPICard icon={RotateCcw}     label="Restarts (24h)" value={totalRestarts}     sub="last 24 hours"                 color="text-yellow-400"  delay={0.2}  />
+        <KPICard icon={Shield}        label="Warnings (24h)" value={warningEvents}     sub={`of ${events.length} events`} color="text-orange-400" delay={0.25} />
       </div>
 
       {/* ── Resource Utilisation (full-width) ── */}
@@ -526,7 +594,7 @@ export default function Dashboard() {
           <div>
             <h3 className={`text-sm font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>Resource Utilisation</h3>
             <p className={`text-xs mt-0.5 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-              Rolling 10-min window · auto-refreshes every 30 s
+              Last 24 hours · sampled while the dashboard is open
             </p>
           </div>
           <div className="flex items-center gap-5">
@@ -602,15 +670,17 @@ export default function Dashboard() {
             <div className={`pt-3 mt-1 border-t text-xs space-y-1.5 ${isDark ? 'border-white/[0.06] text-gray-500' : 'border-gray-100 text-gray-400'}`}>
               <div className="flex justify-between">
                 <span>Data points</span>
-                <span className={isDark ? 'text-gray-300' : 'text-gray-700'}>{series.length} / {WINDOW}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Interval</span>
-                <span className={isDark ? 'text-gray-300' : 'text-gray-700'}>30 s</span>
+                <span className={isDark ? 'text-gray-300' : 'text-gray-700'}>{series.length}</span>
               </div>
               <div className="flex justify-between">
                 <span>Window</span>
-                <span className={isDark ? 'text-gray-300' : 'text-gray-700'}>~{Math.round(series.length * 0.5)} min</span>
+                <span className={isDark ? 'text-gray-300' : 'text-gray-700'}>Last 24 h</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Covered</span>
+                <span className={isDark ? 'text-gray-300' : 'text-gray-700'}>
+                  {series.length > 1 ? `${((series[series.length - 1].ts - series[0].ts) / 3_600_000).toFixed(1)} h` : '—'}
+                </span>
               </div>
             </div>
           </div>
@@ -661,7 +731,7 @@ export default function Dashboard() {
           className={`rounded-xl p-5 border ${isDark ? 'bg-[#0d1220] border-white/[0.06]' : 'bg-white border-gray-200 shadow-sm'}`}
         >
           <h3 className={`text-sm font-semibold mb-1 ${isDark ? 'text-white' : 'text-gray-900'}`}>Pod Status</h3>
-          <p className={`text-xs mb-3 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>{pods.length} pods across {namespaces.length} namespaces</p>
+          <p className={`text-xs mb-3 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>{pods.length} pods across {namespaces.length} namespaces · last 24 h</p>
           <ResponsiveContainer width="100%" height={180}>
             <PieChart>
               <Pie data={podPieData} cx="50%" cy="50%" innerRadius={48} outerRadius={76} dataKey="value" paddingAngle={3}>
@@ -704,8 +774,8 @@ export default function Dashboard() {
         {[
           { icon: Cpu,       label: 'Ready Nodes',   value: `${readyNodes} / ${nodes.length || '—'}`,  color: 'text-blue-400',    bg: 'bg-blue-400/10',    delay: 0.5  },
           { icon: Layers,    label: 'Deployments',   value: deployments.length,                         color: 'text-cyan-400',    bg: 'bg-cyan-400/10',    delay: 0.55 },
-          { icon: HardDrive, label: 'Total Pods',    value: pods.length,                                color: 'text-emerald-400', bg: 'bg-emerald-400/10', delay: 0.6  },
-          { icon: Activity,  label: 'Total Events',  value: events.length,                              color: 'text-yellow-400',  bg: 'bg-yellow-400/10',  delay: 0.65 },
+          { icon: HardDrive, label: 'Pods (24h)',     value: pods.length,                                color: 'text-emerald-400', bg: 'bg-emerald-400/10', delay: 0.6  },
+          { icon: Activity,  label: 'Events (last 24h)', value: events.length,                          color: 'text-yellow-400',  bg: 'bg-yellow-400/10',  delay: 0.65 },
         ].map(({ icon: Icon, label, value, color, bg, delay }) => (
           <motion.div key={label} variants={fadeUp} initial="initial" animate="animate" transition={{ delay }}
             className={`rounded-xl p-4 border ${isDark ? 'bg-[#0d1220] border-white/[0.06]' : 'bg-white border-gray-200 shadow-sm'}`}

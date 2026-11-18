@@ -6,7 +6,6 @@ import {
   Container,
   Rocket,
   Server,
-  Zap,
   FileText,
   Bot,
   Bell,
@@ -27,12 +26,16 @@ const navItems = [
   { to: '/pods', icon: Container, label: 'Pods' },
   { to: '/deployments', icon: Rocket, label: 'Deployments' },
   { to: '/nodes', icon: Server, label: 'Nodes' },
-  { to: '/actions', icon: Zap, label: 'Actions' },
   { to: '/logs', icon: FileText, label: 'Logs' },
   { to: '/alerts', icon: Bell, label: 'Alerts' },
 ];
 
-export default function Sidebar() {
+interface SidebarProps {
+  onOpenChat: () => void;
+  isChatOpen: boolean;
+}
+
+export default function Sidebar({ onOpenChat, isChatOpen }: SidebarProps) {
   const { isDark, toggle } = useTheme();
   const [collapsed, setCollapsed] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -78,21 +81,19 @@ export default function Sidebar() {
 
       {/* Nav */}
       <nav className="flex-1 px-3 py-2 space-y-0.5 overflow-y-auto">
-        {/* AI Assistant — NavLink, same as all other items */}
-        <NavLink
-          to="/ai-assistant"
+        {/* AI Assistant — opens the chat panel */}
+        <button
+          onClick={onOpenChat}
           title="AI Assistant"
-          className={({ isActive }) =>
-            `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all duration-200 relative ${
-              isActive
-                ? isDark
-                  ? 'bg-blue-500/10 text-blue-400'
-                  : 'bg-blue-50 text-blue-600'
-                : isDark
-                  ? 'text-gray-400 hover:bg-white/[0.04] hover:text-gray-200'
-                  : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
-            } ${collapsed ? 'justify-center' : ''}`
-          }
+          className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all duration-200 relative ${
+            isChatOpen
+              ? isDark
+                ? 'bg-blue-500/10 text-blue-400'
+                : 'bg-blue-50 text-blue-600'
+              : isDark
+                ? 'text-gray-400 hover:bg-white/[0.04] hover:text-gray-200'
+                : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+          } ${collapsed ? 'justify-center' : ''}`}
         >
           <Sparkles size={18} className="flex-shrink-0" />
           {!collapsed && <span>AI Assistant</span>}
@@ -101,7 +102,7 @@ export default function Sidebar() {
               collapsed ? 'absolute top-1.5 right-1.5' : 'ml-auto'
             }`}
           />
-        </NavLink>
+        </button>
 
         {navItems.map(({ to, icon: Icon, label }) => (
           <NavLink

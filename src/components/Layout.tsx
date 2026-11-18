@@ -19,7 +19,7 @@ export default function Layout() {
 
   return (
     <div className={`min-h-screen ${isDark ? 'bg-[#060a14] text-white' : 'bg-gray-50 text-gray-900'}`}>
-      <Sidebar />
+      <Sidebar onOpenChat={() => openChat()} isChatOpen={isChatOpen} />
       <div className="ml-[240px] transition-all duration-300">
         <Header />
         <main className="p-6">
@@ -27,7 +27,7 @@ export default function Layout() {
         </main>
       </div>
 
-      {/* Floating AI Chat panel — triggered only from Incidents "Investigate" button */}
+      {/* AI Chat panel — opened from the sidebar "AI Assistant" item or the Incidents "Investigate" button */}
       <AIChat
         isOpen={isChatOpen}
         onClose={() => setIsChatOpen(false)}

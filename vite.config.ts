@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react';
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
   // Load env file based on `mode` in the current working directory.
-  const env = loadEnv(mode, process.cwd(), '');
+  const env = loadEnv(mode, '.', '');
   
   // Get OpenShift credentials from environment variables
   const OPENSHIFT_API_URL = env.VITE_OPENSHIFT_API_URL || 'https://api.rm3.7wse.p1.openshiftapps.com:6443';

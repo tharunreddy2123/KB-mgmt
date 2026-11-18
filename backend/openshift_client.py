@@ -37,9 +37,17 @@ class OpenShiftClient:
     IN_CLUSTER_API_URL = "https://kubernetes.default.svc"
     DEFAULT_API_URL = "https://api.rm3.7wse.p1.openshiftapps.com:6443"
 
+    @staticmethod
+    def _clean_token(value: str) -> str:
+        """Strip whitespace/newlines, surrounding quotes and a 'Bearer ' prefix (common when a token comes from a Secret)."""
+        value = (value or "").strip().strip("'\"").strip()
+        if value.lower().startswith("bearer "):
+            value = value[7:].strip()
+        return "".join(value.split())
+
     def __init__(self):
         # Explicit token (env var or pasted in the UI) takes priority over the in-cluster one
-        self._token_override = settings.openshift_token
+        self._token_override = self._clean_token(settings.openshift_token)
         self.api_url = settings.openshift_api_url or (
             self.IN_CLUSTER_API_URL if self.in_cluster else self.DEFAULT_API_URL
         )
@@ -65,7 +73,7 @@ class OpenShiftClient:
 
     @token.setter
     def token(self, value: str):
-        self._token_override = value
+        self._token_override = self._clean_token(value)
 
     @property
     def headers(self) -> Dict[str, str]:
@@ -451,7 +459,11 @@ class OpenShiftClient:
         """Check if a command is in the whitelist"""
         # Remove extra spaces and normalize
         cmd = " ".join(command.split())
-        
+
+        # In read-only mode only get / describe / logs may run
+        if self.read_only and cmd.split()[1:2] not in (["get"], ["describe"], ["logs"]):
+            return False
+
         # Check against whitelist patterns
         for allowed in self.ALLOWED_COMMANDS:
             # Replace placeholders with regex patterns
@@ -466,8 +478,23 @@ class OpenShiftClient:
     
     # ── Write / action operations ─────────────────────────────────────────────
 
+    READ_ONLY_ERROR = "Read-only mode: write operations (create, delete, scale, restart) are disabled."
+
+    @property
+    def read_only(self) -> bool:
+        return settings.read_only
+
+    def _blocked(self) -> Optional[Dict[str, Any]]:
+        """Error result returned by every write method while read-only mode is on."""
+        if self.read_only:
+            return {"success": False, "error": self.READ_ONLY_ERROR, "read_only": True}
+        return None
+
     async def create_resource(self, namespace: str, manifest: Dict[str, Any]) -> Dict[str, Any]:
         """Create a Kubernetes resource via POST to the API"""
+        blocked = self._blocked()
+        if blocked:
+            return blocked
         kind = manifest.get("kind", "")
         api_version = manifest.get("apiVersion", "v1")
 
@@ -489,6 +516,9 @@ class OpenShiftClient:
 
     async def delete_resource(self, namespace: str, kind: str, name: str) -> Dict[str, Any]:
         """Delete a named Kubernetes resource"""
+        blocked = self._blocked()
+        if blocked:
+            return blocked
         _, path = self._resource_path(kind, "v1", namespace)
         # replace list path with named path
         url = f"{self.api_url}{path}/{name}"
@@ -503,6 +533,9 @@ class OpenShiftClient:
 
     async def scale_deployment(self, namespace: str, name: str, replicas: int) -> Dict[str, Any]:
         """Patch a Deployment's replica count"""
+        blocked = self._blocked()
+        if blocked:
+            return blocked
         url = f"{self.api_url}/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale"
         patch = {"spec": {"replicas": replicas}}
         headers = dict(self.headers)
@@ -518,6 +551,9 @@ class OpenShiftClient:
 
     async def restart_deployment(self, namespace: str, name: str) -> Dict[str, Any]:
         """Rollout restart a deployment by patching its annotation"""
+        blocked = self._blocked()
+        if blocked:
+            return blocked
         import datetime
         url = f"{self.api_url}/apis/apps/v1/namespaces/{namespace}/deployments/{name}"
         patch = {
@@ -576,6 +612,10 @@ class OpenShiftClient:
         Tries: deployment → deploymentconfig → replicationcontroller.
         Returns the first success, or the last error if all fail.
         """
+        blocked = self._blocked()
+        if blocked:
+            return blocked
+
         import re as _re
 
         resource_types = ["deployment", "deploymentconfig", "replicationcontroller", "statefulset"]
@@ -633,6 +673,9 @@ class OpenShiftClient:
 
     async def _oc_scale_via_api(self, namespace: str, name: str, replicas: int) -> Dict[str, Any]:
         """API fallback when oc binary is not available: tries all three controller types."""
+        blocked = self._blocked()
+        if blocked:
+            return blocked
         candidates = [
             ("deployment",            f"/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale"),
             ("deploymentconfig",      f"/apis/apps.openshift.io/v1/namespaces/{namespace}/deploymentconfigs/{name}/scale"),

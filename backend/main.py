@@ -145,12 +145,20 @@ def _parse_action(msg: str) -> Optional[Dict[str, Any]]:
 
     return None
 
+_READ_ACTIONS = {"describe", "logs"}
+_READ_ONLY_MESSAGE = ("Read-only mode: this dashboard can only view the cluster. "
+                      "Create, delete, scale and restart are disabled.")
+
 async def _execute_action(act: Dict[str, Any]) -> Tuple[str, bool]:
     action    = act["action"]
     kind      = act.get("kind", "")
     name      = act.get("name", "")
     ns        = act.get("namespace", _DEFAULT_NAMESPACE)
     container = act.get("container")
+    # Defence in depth: refuse anything that isn't a plain read while read-only is on,
+    # even if a client calls the API directly.
+    if settings.read_only and action not in _READ_ACTIONS:
+        return (_READ_ONLY_MESSAGE, False)
     try:
         if action == "create":
             r = await openshift_client.create_resource(ns, act["manifest"])
@@ -280,6 +288,11 @@ async def _build_cluster_context(intents: set) -> str:
             sections.append(f"EVENTS: error - {ex}")
     return "\n\n".join(sections)
 
+@app.get("/api/mode")
+async def get_mode():
+    """Lets the UI know whether write operations are enabled."""
+    return {"read_only": settings.read_only}
+
 @app.get("/")
 async def root():
     return {"service": "OpenShift AI Assistant API", "status": "running", "version": "3.0.0"}
@@ -332,9 +345,9 @@ async def chat(request: ChatRequest):
                         "Your cluster token is no longer valid. To fix:\n\n"
                         "1. Go to the [OpenShift console](https://console.apps.rm3.7wse.p1.openshiftapps.com)\n"
                         "2. Click your username → **Copy login command** → **Display Token**\n"
-                        "3. Copy the `sha256~...` token\n"
-                        "4. Open `backend/.env` and update:\n"
-                        "   `OPENSHIFT_TOKEN=sha256~<your-new-token>`\n"
+                        "3. Copy the full token (any format is accepted)\n"
+                        "4. Open `backend/.env` (or the cluster Secret) and update:\n"
+                        "   `OPENSHIFT_TOKEN=<your-new-token>`\n"
                         "5. Restart the backend: `.\\start-backend.ps1`"
                     ),
                     action_performed=None, action_success=None, context_used=None
@@ -418,6 +431,8 @@ async def scale_workload(request: ScaleRequest):
     Tries deployment → deploymentconfig → replicationcontroller automatically.
     Falls back to direct API patching when the oc binary is not available.
     """
+    if settings.read_only:
+        raise HTTPException(status_code=403, detail=_READ_ONLY_MESSAGE)
     if request.replicas < 0:
         raise HTTPException(status_code=400, detail="replicas must be >= 0")
 
@@ -556,8 +571,8 @@ class TokenUpdateRequest(BaseModel):
 async def update_token(request: TokenUpdateRequest):
     """Hot-reload the OpenShift token without restarting the backend."""
     new_token = request.token.strip()
-    if not new_token.startswith("sha256~"):
-        raise HTTPException(status_code=400, detail="Token must start with sha256~")
+    if not new_token:
+        raise HTTPException(status_code=400, detail="Token is required")
     openshift_client.token = new_token
     # Verify it works
     probe = await openshift_client._api_request("/apis/project.openshift.io/v1/projects")

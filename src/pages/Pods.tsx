@@ -93,6 +93,8 @@ export default function Pods() {
   // textarea value for the "paste logs" input inside the RBAC-denied panel
   const [pasteInput, setPasteInput] = useState('');
   // scale confirmation modal
+  // The backend is read-only by default; scale controls only appear when it reports writes enabled
+  const [readOnly, setReadOnly] = useState(true);
   const [scaleModal, setScaleModal] = useState<ScaleModal | null>(null);
   const [scaleLoading, setScaleLoading] = useState(false);
   const [scaleResult, setScaleResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -138,6 +140,13 @@ export default function Pods() {
   };
 
   useEffect(() => { fetchData(); }, []);
+
+  useEffect(() => {
+    fetch(`${BACKEND_URL}/api/mode`)
+      .then(r => (r.ok ? r.json() : { read_only: true }))
+      .then(d => setReadOnly(d.read_only !== false))
+      .catch(() => setReadOnly(true));
+  }, []);
 
   // ── scale helpers ─────────────────────────────────────────────────────────
 
@@ -626,9 +635,9 @@ export default function Pods() {
                   <td className="px-4 py-3">
                     <span className="text-xs font-medium text-yellow-400">scaled-down</span>
                   </td>
-                  {/* Actions — Scale Up only */}
+                  {/* Actions — Scale Up only (hidden while the backend is read-only) */}
                   <td className="px-4 py-3">
-                    <button
+                    {!readOnly && <button
                       onClick={() => {
                         const fakePod = {
                           metadata: {
@@ -650,7 +659,7 @@ export default function Pods() {
                     >
                       <ChevronUp size={11} />
                       Scale Up
-                    </button>
+                    </button>}
                   </td>
                 </tr>
               ))}
@@ -744,8 +753,8 @@ export default function Pods() {
                             Logs
                           </button>
 
-                          {/* Scale Up / Scale Down — disabled for standalone pods */}
-                          {(() => {
+                          {/* Scale Up / Scale Down — hidden while the backend is read-only */}
+                          {!readOnly && (() => {
                             const nsScalable = scalableNamespaces.has(pod.metadata.namespace);
                             const hasController = (pod.metadata.ownerReferences ?? []).length > 0;
                             const canScale = nsScalable && hasController;

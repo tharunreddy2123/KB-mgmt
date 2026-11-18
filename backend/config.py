@@ -8,6 +8,9 @@ class Settings(BaseSettings):
     # Leave both empty when deployed inside OpenShift: the pod's service account is used automatically.
     openshift_api_url: str = ""
     openshift_token: str = ""
+    # Safety: when true (the default) the backend refuses every write to the cluster
+    # (create / delete / scale / restart). Reads, logs and describe still work.
+    read_only: bool = True
     # Comma-separated namespaces to show when the service account can't list projects
     # (e.g. WATCH_NAMESPACES=tharunreddy-dev,tharunreddy-stage)
     watch_namespaces: str = ""

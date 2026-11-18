@@ -29,13 +29,6 @@ function MessageContent({ content }: { content: string }) {
             ? <code key={j} className="bg-gray-200 dark:bg-gray-600 px-1 py-0.5 rounded text-xs font-mono">{part.slice(1, -1)}</code>
             : <span key={j}>{part}</span>
         );
-        // Bold **text**
-        const boldLine = rendered.map((el, j) => {
-          if (typeof el === 'string') {
-            return el.replace(/\*\*(.+?)\*\*/g, '$1');
-          }
-          return el;
-        });
         // Section headers (lines starting with ##/###)
         if (/^#{1,3}\s/.test(line)) {
           return <p key={i} className="font-semibold text-blue-600 dark:text-blue-400 mt-2">{line.replace(/^#{1,3}\s/, '')}</p>;
@@ -61,7 +54,7 @@ const SUGGESTION_GROUPS = [
   { icon: Server,        label: 'Node status',               query: 'Show all nodes and their status' },
   { icon: Layers,        label: 'Deployments',               query: 'Show all deployments and their replica status' },
   { icon: AlertTriangle, label: 'Warning events',            query: 'Show recent warning and error events' },
-  { icon: Box,           label: 'Create nginx pod',          query: 'Create nginx pod in tharunreddy-dev' },
+  { icon: Box,           label: 'Root cause of failing pods', query: 'Give the root cause of failing pods' },
   { icon: Layers,        label: 'Namespaces',                query: 'List all namespaces and projects' },
   { icon: AlertTriangle, label: 'Failed deployments',        query: 'Show failed or degraded deployments' },
 ];
@@ -167,7 +160,7 @@ export default function AIChat({ isOpen, onClose, initialMessage }: AIChatProps)
   if (!isOpen) return null;
 
   return (
-    <div className="fixed top-0 right-0 h-screen w-[420px] z-50 flex flex-col bg-white dark:bg-gray-900 border-l border-gray-200 dark:border-white/[0.08] shadow-2xl">
+    <div className="fixed top-0 right-0 bottom-0 left-[240px] z-50 flex flex-col bg-white dark:bg-[#060a14] border-l border-gray-200 dark:border-white/[0.08]">
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-white/[0.08]">
           <div className="flex items-center gap-3">
